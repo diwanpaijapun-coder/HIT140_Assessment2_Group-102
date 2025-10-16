@@ -1,0 +1,783 @@
+Code
+
+Data cleaned 
+
+
+
+# ---------------------------------------------
+# HIT140 – Assignment 3: Data Cleaning Script
+# Investigation B: Seasonal Behaviour Changes
+# ---------------------------------------------
+
+import pandas as pd
+import numpy as np
+import os
+
+# -------------------------------
+# 1️⃣ File paths
+# -------------------------------
+bat_file = "/Users/bibekkhakural/data science/cleaned_dataset1.csv"
+rat_file = "/Users/bibekkhakural/data science/cleaned_dataset2.csv"
+
+# -------------------------------
+# 2️⃣ Load datasets
+# -------------------------------
+try:
+    bat_df = pd.read_csv(bat_file)
+    rat_df = pd.read_csv(rat_file)
+    print("✅ Files loaded successfully.")
+except FileNotFoundError as e:
+    print("\n❌ Error: Could not find one or both dataset files.")
+    print("Please check your file names and directory path.")
+    raise e
+
+# -------------------------------
+# 3️⃣ Basic inspection
+# -------------------------------
+print("\n=== Dataset Shapes ===")
+print("Bat dataset:", bat_df.shape)
+print("Rat dataset:", rat_df.shape)
+
+print("\n=== Bat Dataset Info ===")
+print(bat_df.info())
+
+print("\n=== Rat Dataset Info ===")
+print(rat_df.info())
+
+# -------------------------------
+# 4️⃣ Standardize column names
+# -------------------------------
+bat_df.columns = bat_df.columns.str.strip().str.lower().str.replace(" ", "_")
+rat_df.columns = rat_df.columns.str.strip().str.lower().str.replace(" ", "_")
+
+# -------------------------------
+# 5️⃣ Handle missing values
+# -------------------------------
+# Replace empty strings or markers with NaN
+bat_df.replace([" ", "", "-", "NA", "na", "NaN"], np.nan, inplace=True)
+rat_df.replace([" ", "", "-", "NA", "na", "NaN"], np.nan, inplace=True)
+
+# Numeric columns → fill with median
+num_cols_bat = bat_df.select_dtypes(include=[np.number]).columns
+num_cols_rat = rat_df.select_dtypes(include=[np.number]).columns
+
+bat_df[num_cols_bat] = bat_df[num_cols_bat].apply(lambda x: x.fillna(x.median()))
+rat_df[num_cols_rat] = rat_df[num_cols_rat].apply(lambda x: x.fillna(x.median()))
+
+# Categorical columns → fill with mode
+cat_cols_bat = bat_df.select_dtypes(include=['object']).columns
+cat_cols_rat = rat_df.select_dtypes(include=['object']).columns
+
+bat_df[cat_cols_bat] = bat_df[cat_cols_bat].apply(
+    lambda x: x.fillna(x.mode()[0] if not x.mode().empty else "Unknown")
+)
+rat_df[cat_cols_rat] = rat_df[cat_cols_rat].apply(
+    lambda x: x.fillna(x.mode()[0] if not x.mode().empty else "Unknown")
+)
+
+# -------------------------------
+# 6️⃣ Convert date/time columns
+# -------------------------------
+time_columns_bat = ["start_time", "rat_period_start", "rat_period_end", "sunset_time"]
+for col in time_columns_bat:
+    if col in bat_df.columns:
+        bat_df[col] = pd.to_datetime(bat_df[col], errors='coerce')
+
+if "time" in rat_df.columns:
+    rat_df["time"] = pd.to_datetime(rat_df["time"], errors='coerce')
+
+# -------------------------------
+# 7️⃣ Standardize season/month labels
+# -------------------------------
+for df in [bat_df, rat_df]:
+    for col in ["month", "season"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.lower().str.strip()
+
+season_map = {'win': 'winter', 'spr': 'spring', 'sum': 'summer', 'aut': 'autumn'}
+bat_df["season"] = bat_df["season"].replace(season_map)
+rat_df["month"] = rat_df["month"].replace(season_map)  # in case month has seasons
+
+# -------------------------------
+# 8️⃣ Remove duplicates & outliers
+# -------------------------------
+bat_df.drop_duplicates(inplace=True)
+rat_df.drop_duplicates(inplace=True)
+
+# Remove negative or extreme timing values
+if "hours_after_sunset" in bat_df.columns:
+    bat_df = bat_df[(bat_df["hours_after_sunset"] >= 0) & (bat_df["hours_after_sunset"] < 12)]
+
+if "hours_after_sunset" in rat_df.columns:
+    rat_df = rat_df[(rat_df["hours_after_sunset"] >= 0) & (rat_df["hours_after_sunset"] < 12)]
+
+# -------------------------------
+# 9️⃣ Save cleaned data
+# -------------------------------
+bat_df.to_csv("/Users/bibekkhakural/data science/cleaned_dataset1.csv", index=False)
+rat_df.to_csv("/Users/bibekkhakural/data science/cleaned_dataset2.csv", index=False)
+
+print("\n✅ Cleaning completed. Cleaned datasets saved.")
+
+
+Feature Engineering 
+
+#!/usr/bin/env python3
+"""
+Creates engineered features for the Bat vs Rat project.
+
+Inputs (default):
+  - cleaned_dataset1.csv  (bat landings)
+  - cleaned_dataset2.csv  (30-min observation windows)
+
+Outputs:
+  - engineered_dataset1.csv
+  - engineered_dataset2.csv
+  - engineered_merged.csv  (d1 enriched with d2 seasonal/month aggregates)
+"""
+
+import argparse
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+EPS = 1e-9
+
+def load_and_normalise_columns(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
+
+def ensure_columns(df: pd.DataFrame, cols):
+    for col in cols:
+        if col not in df.columns:
+            df[col] = np.nan
+
+def zscore(series: pd.Series) -> pd.Series:
+    mu = series.mean(skipna=True)
+    sd = series.std(ddof=0, skipna=True)
+    return (series - mu) / (sd + EPS)
+
+def engineer_d1(d1: pd.DataFrame) -> pd.DataFrame:
+    ensure_columns(d1, [
+        "seconds_after_rat_arrival","bat_landing_to_food","risk","reward",
+        "hours_after_sunset","season","month"
+    ])
+    for col in ["seconds_after_rat_arrival","bat_landing_to_food","risk","reward","hours_after_sunset"]:
+        d1[col] = pd.to_numeric(d1[col], errors="coerce")
+
+    d1["risk_index"] = d1["risk"].fillna(0).astype(float)
+    d1["risk_reward_delta"] = d1["risk"].fillna(0) - d1["reward"].fillna(0)
+    d1["landed_before_rats"] = (d1["seconds_after_rat_arrival"] < 0).astype(float)
+    d1["latency_to_food_z"] = zscore(d1["bat_landing_to_food"])
+    d1["sec_after_rat_arrival_norm"] = d1["seconds_after_rat_arrival"] / (np.abs(d1["hours_after_sunset"]) + 0.01)
+    d1["hours_after_sunset_z"] = zscore(d1["hours_after_sunset"])
+    d1["season_code"] = d1["season"].astype("category").cat.codes
+    d1["month_code"] = d1["month"].astype("category").cat.codes
+    d1["night_phase"] = pd.cut(d1["hours_after_sunset"], bins=[-np.inf,1,3,np.inf], labels=["early","mid","late"])
+    return d1
+
+def engineer_d2(d2: pd.DataFrame) -> pd.DataFrame:
+    ensure_columns(d2, [
+        "rat_arrival_number","rat_minutes","bat_landing_number","food_availability",
+        "season","month"
+    ])
+    for col in ["rat_arrival_number","rat_minutes","bat_landing_number","food_availability"]:
+        d2[col] = pd.to_numeric(d2[col], errors="coerce")
+
+    d2["rat_presence_intensity"] = d2["rat_minutes"] / (d2["rat_arrival_number"] + EPS)
+    d2["bat_to_rat_ratio"] = d2["bat_landing_number"] / (d2["rat_arrival_number"] + EPS)
+    d2["bat_landings_per_min"] = d2["bat_landing_number"] / 30.0
+    d2["rat_minutes_share"] = d2["rat_minutes"] / 30.0
+    d2["food_availability_z"] = zscore(d2["food_availability"])
+    d2["season_code"] = d2["season"].astype("category").cat.codes
+    d2["month_code"] = d2["month"].astype("category").cat.codes
+
+    # Optional: replace infinite ratios when rat_arrival_number == 0
+    d2.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return d2
+
+def seasonal_month_aggregates(d1: pd.DataFrame, d2: pd.DataFrame):
+    agg_d1 = (
+        d1.groupby(["season","month"], dropna=False)
+          .agg(mean_risk=("risk","mean"),
+               mean_reward=("reward","mean"),
+               landings_count=("risk","size"))
+          .reset_index()
+    )
+    agg_d2 = (
+        d2.groupby(["season","month"], dropna=False)
+          .agg(mean_rat_arrivals=("rat_arrival_number","mean"),
+               mean_rat_minutes=("rat_minutes","mean"),
+               mean_bat_landings=("bat_landing_number","mean"))
+          .reset_index()
+    )
+    return agg_d1, agg_d2
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--d1", default="cleaned_dataset1.csv")
+    parser.add_argument("--d2", default="cleaned_dataset2.csv")
+    parser.add_argument("--out1", default="engineered_dataset1.csv")
+    parser.add_argument("--out2", default="engineered_dataset2.csv")
+    parser.add_argument("--outm", default="engineered_merged.csv")
+    args = parser.parse_args()
+
+    d1 = load_and_normalise_columns(args.d1)
+    d2 = load_and_normalise_columns(args.d2)
+
+    d1_eng = engineer_d1(d1.copy())
+    d2_eng = engineer_d2(d2.copy())
+
+    # Ensure merge keys are strings to avoid dtype mismatches
+    for df in (d1_eng, d2_eng):
+        for k in ["season","month"]:
+            if k in df.columns: df[k] = df[k].astype(str)
+
+    agg_d1, agg_d2 = seasonal_month_aggregates(d1_eng, d2_eng)
+    d1_enriched = d1_eng.merge(agg_d2, on=["season","month"], how="left")
+    d2_enriched = d2_eng.merge(agg_d1, on=["season","month"], how="left")
+
+    cols_from_d2 = ["season","month","rat_presence_intensity","bat_to_rat_ratio",
+                    "bat_landings_per_min","rat_minutes_share","food_availability_z"]
+    cols_from_d2 = [c for c in cols_from_d2 if c in d2_enriched.columns]
+    merged = d1_enriched.merge(d2_enriched[cols_from_d2], on=["season","month"], how="left", suffixes=("","_from_d2"))
+
+    Path(args.out1).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out2).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.outm).parent.mkdir(parents=True, exist_ok=True)
+
+    d1_enriched.to_csv(args.out1, index=False)
+    d2_enriched.to_csv(args.out2, index=False)
+    merged.to_csv(args.outm, index=False)
+
+    print(f"Saved: {args.out1}  (rows={len(d1_enriched)}, cols={d1_enriched.shape[1]})")
+    print(f"Saved: {args.out2}  (rows={len(d2_enriched)}, cols={d2_enriched.shape[1]})")
+    print(f"Saved: {args.outm}  (rows={len(merged)}, cols={merged.shape[1]})")
+
+    new_cols_d1 = ["risk_index","risk_reward_delta","landed_before_rats","latency_to_food_z",
+                   "sec_after_rat_arrival_norm","hours_after_sunset_z","season_code","month_code",
+                   "night_phase","mean_rat_arrivals","mean_rat_minutes","mean_bat_landings"]
+    new_cols_d2 = ["rat_presence_intensity","bat_to_rat_ratio","bat_landings_per_min","rat_minutes_share",
+                   "food_availability_z","season_code","month_code","mean_risk","mean_reward","landings_count"]
+    print("\nNew/Enriched columns in d1:")
+    print([c for c in new_cols_d1 if c in d1_enriched.columns])
+    print("\nNew/Enriched columns in d2:")
+    print([c for c in new_cols_d2 if c in d2_enriched.columns])
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Descriptive analysis
+
+
+
+# ---------------------------------------------
+# HIT140 – Assignment 3: Investigation B
+# Seasonal Behaviour Changes: Descriptive Analysis
+# ---------------------------------------------
+
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+# -------------------------------
+# 1️⃣ Load dataset
+# -------------------------------
+print("Loading dataset for seasonal descriptive analysis...")
+df = pd.read_csv("cleaned_dataset2.csv")
+
+# -------------------------------
+# 2️⃣ Create 'season' column
+# -------------------------------
+def get_season(month):
+    if month in [12, 1, 2]:
+        return "Winter"
+    elif month in [3, 4, 5]:
+        return "Spring"
+    elif month in [6, 7, 8]:
+        return "Summer"
+    else:
+        return "Autumn"
+
+# Handle 0 as December if present
+df["season"] = df["month"].apply(lambda x: get_season(12 if x == 0 else int(x)))
+seasons_order = ["Winter", "Spring", "Summer", "Autumn"]
+
+# -------------------------------
+# 3️⃣ Seasonal Descriptive Summary
+# -------------------------------
+seasonal_summary = df.groupby("season").agg({
+    "bat_landing_number": ["count", "mean", "std", "min", "max", "sum"],
+    "food_availability": ["mean", "std", "min", "max"],
+    "rat_minutes": ["mean", "std", "sum"],
+    "rat_arrival_number": ["sum"]
+}).round(2)
+
+print("\n" + "="*70)
+print("📊 SEASONAL DESCRIPTIVE STATISTICS")
+print("="*70)
+print(seasonal_summary)
+
+# -------------------------------
+# 4️⃣ Peak Activity & Trends
+# -------------------------------
+print("\n" + "="*70)
+print("🌙 PEAK ACTIVITY ANALYSIS BY SEASON")
+print("="*70)
+
+peak_activity_summary = []
+
+for season in seasons_order:
+    season_data = df[df["season"] == season]
+    if len(season_data) > 0:
+        # Find peak hour and activity
+        hourly_avg = season_data.groupby("hours_after_sunset")["bat_landing_number"].mean()
+        if not hourly_avg.empty:
+            peak_hour = hourly_avg.idxmax()
+            peak_value = hourly_avg.max()
+        else:
+            peak_hour, peak_value = np.nan, np.nan
+
+        # Most active month in this season
+        monthly_avg = season_data.groupby("month")["bat_landing_number"].mean()
+        if not monthly_avg.empty:
+            top_month = monthly_avg.idxmax()
+            top_month_value = monthly_avg.max()
+        else:
+            top_month, top_month_value = np.nan, np.nan
+
+        peak_activity_summary.append({
+            "Season": season,
+            "Peak Hour (After Sunset)": peak_hour,
+            "Peak Bat Activity": round(peak_value, 2),
+            "Most Active Month": top_month,
+            "Avg Bats in Peak Month": round(top_month_value, 2),
+            "Avg Food Availability": round(season_data["food_availability"].mean(), 2),
+            "Observations": len(season_data)
+        })
+
+peak_df = pd.DataFrame(peak_activity_summary)
+print(peak_df.to_string(index=False))
+
+# -------------------------------
+# 5️⃣ Key Insights
+# -------------------------------
+print("\n" + "="*70)
+print("🔍 KEY SEASONAL INSIGHTS")
+print("="*70)
+
+# Identify most and least active seasons
+if "bat_landing_number" in df.columns:
+    bat_means = df.groupby("season")["bat_landing_number"].mean()
+    most_active = bat_means.idxmax()
+    least_active = bat_means.idxmin()
+    print(f"• Most active season for bats: {most_active} ({bat_means[most_active]:.2f} average landings)")
+    print(f"• Least active season for bats: {least_active} ({bat_means[least_active]:.2f} average landings)")
+
+# Food availability trend
+if "food_availability" in df.columns:
+    food_means = df.groupby("season")["food_availability"].mean()
+    high_food = food_means.idxmax()
+    low_food = food_means.idxmin()
+    print(f"• Highest food availability: {high_food} ({food_means[high_food]:.2f})")
+    print(f"• Lowest food availability: {low_food} ({food_means[low_food]:.2f})")
+
+# Rat activity summary
+if "rat_minutes" in df.columns:
+    rat_means = df.groupby("season")["rat_minutes"].mean()
+    high_rat = rat_means.idxmax()
+    low_rat = rat_means.idxmin()
+    print(f"• Rats most active in: {high_rat} ({rat_means[high_rat]:.2f} min avg)")
+    print(f"• Rats least active in: {low_rat} ({rat_means[low_rat]:.2f} min avg)")
+
+print("\n✅ Seasonal descriptive analysis complete!")
+print("No plots generated — statistical results only.")
+
+
+
+
+
+
+
+
+
+
+
+
+Visualization code
+
+
+# ---------------------------------------------
+# HIT140 – Assignment 3: Investigation B
+# Seasonal Behaviour Changes: Visualization
+# ---------------------------------------------
+
+# -------------------------------
+# 1️⃣ Imports
+# -------------------------------
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sns.set(style="whitegrid", palette="muted", font_scale=1.2)
+plt.rcParams["figure.figsize"] = (12,7)
+
+# -------------------------------
+# 2️⃣ Load cleaned datasets
+# -------------------------------
+bat_file = "/Users/bibekkhakural/data science/cleaned_dataset1.csv"
+rat_file = "/Users/bibekkhakural/data science/cleaned_dataset2.csv"
+
+bat_df = pd.read_csv(bat_file)
+rat_df = pd.read_csv(rat_file)
+
+# Standardize column names
+bat_df.columns = bat_df.columns.str.strip().str.lower().str.replace(" ", "_")
+rat_df.columns = rat_df.columns.str.strip().str.lower().str.replace(" ", "_")
+
+# Add species column for combined plots
+bat_df["species"] = "Bat"
+rat_df["species"] = "Rat"
+
+combined_df = pd.concat([bat_df, rat_df])
+
+# -------------------------------
+# 3️⃣ Ensure 'season' column exists
+# -------------------------------
+season_order = ["summer", "autumn", "winter", "spring"]
+
+def create_season_column(df):
+    if "season" in df.columns:
+        df["season"] = df["season"].astype(str).str.lower().str.strip()
+        df["season"] = df["season"].replace({'win':'winter', 'spr':'spring', 'sum':'summer', 'aut':'autumn'})
+    elif "month" in df.columns:
+        def month_to_season(m):
+            try:
+                m = int(m)
+                if m in [12,1,2]: return "summer"
+                elif m in [3,4,5]: return "autumn"
+                elif m in [6,7,8]: return "winter"
+                elif m in [9,10,11]: return "spring"
+            except:
+                m = str(m).lower()
+                if m.startswith("win"): return "winter"
+                elif m.startswith("spr"): return "spring"
+                elif m.startswith("sum"): return "summer"
+                elif m.startswith("aut"): return "autumn"
+            return pd.NA
+        df["season"] = df["month"].apply(month_to_season)
+    else:
+        df["season"] = pd.NA
+    df["season"] = pd.Categorical(df["season"], categories=season_order, ordered=True)
+    return df
+
+bat_df = create_season_column(bat_df)
+rat_df = create_season_column(rat_df)
+combined_df = pd.concat([bat_df, rat_df])  # update combined_df after season creation
+
+# -------------------------------
+# 4️⃣ Visualizations
+# -------------------------------
+
+# ---- 1️⃣ Histogram: Hours After Sunset ----
+plt.figure()
+sns.histplot(bat_df["hours_after_sunset"], bins=12, kde=True, color='skyblue', label='Bats')
+sns.histplot(rat_df["hours_after_sunset"], bins=12, kde=True, color='salmon', label='Rats')
+plt.title("Distribution of Activity Hours After Sunset")
+plt.xlabel("Hours After Sunset")
+plt.ylabel("Frequency")
+plt.legend()
+plt.show()
+
+# ---- 2️⃣ Boxplot: Hours After Sunset by Species ----
+plt.figure()
+sns.boxplot(x="species", y="hours_after_sunset", data=combined_df, palette=["skyblue","salmon"])
+plt.title("Activity Hours After Sunset by Species")
+plt.ylabel("Hours After Sunset")
+plt.show()
+
+# ---- 3️⃣ Bar Chart: Seasonal Observations Count ----
+if bat_df["season"].notna().any() or rat_df["season"].notna().any():
+    bat_season_count = bat_df["season"].value_counts().reindex(season_order).fillna(0)
+    rat_season_count = rat_df["season"].value_counts().reindex(season_order).fillna(0)
+    season_df = pd.DataFrame({'Bat': bat_season_count, 'Rat': rat_season_count})
+    season_df.plot(kind='bar', color=['skyblue','salmon'])
+    plt.title("Seasonal Observations Count")
+    plt.xlabel("Season")
+    plt.ylabel("Number of Observations")
+    plt.xticks(rotation=0)
+    plt.show()
+else:
+    print("⚠️ No seasonal data available for bar chart.")
+
+# ---- 4️⃣ Boxplot: Hours After Sunset by Season ----
+if bat_df["season"].notna().any():
+    plt.figure()
+    sns.boxplot(x="season", y="hours_after_sunset", data=bat_df, palette="Blues")
+    plt.title("Bat Activity by Season")
+    plt.xlabel("Season")
+    plt.ylabel("Hours After Sunset")
+    plt.show()
+else:
+    print("⚠️ Bat dataset: No seasonal data for boxplot.")
+
+if rat_df["season"].notna().any():
+    plt.figure()
+    sns.boxplot(x="season", y="hours_after_sunset", data=rat_df, palette="Reds")
+    plt.title("Rat Activity by Season")
+    plt.xlabel("Season")
+    plt.ylabel("Hours After Sunset")
+    plt.show()
+else:
+    print("⚠️ Rat dataset: No seasonal data for boxplot.")
+
+# -------------------------------
+# 5️⃣ Correlation Matrix
+# -------------------------------
+bat_numeric = bat_df.select_dtypes(include=[np.number])
+rat_numeric = rat_df.select_dtypes(include=[np.number])
+
+# ---- Bat Correlation Matrix ----
+if not bat_numeric.empty:
+    bat_corr = bat_numeric.corr()
+    print("🐝 Bat Dataset Correlation Matrix:\n", bat_corr, "\n")
+
+    plt.figure()
+    sns.heatmap(bat_corr, annot=True, fmt=".2f", cmap="Blues", cbar=True)
+    plt.title("Bat Dataset Correlation Matrix")
+    plt.show()
+else:
+    print("⚠️ Bat dataset has no numeric columns for correlation matrix.")
+
+# ---- Rat Correlation Matrix ----
+if not rat_numeric.empty:
+    rat_corr = rat_numeric.corr()
+    print("🐀 Rat Dataset Correlation Matrix:\n", rat_corr, "\n")
+
+    plt.figure()
+    sns.heatmap(rat_corr, annot=True, fmt=".2f", cmap="Reds", cbar=True)
+    plt.title("Rat Dataset Correlation Matrix")
+    plt.show()
+else:
+    print("⚠️ Rat dataset has no numeric columns for correlation matrix.")
+
+Hypothesis Testing 
+# ---------------------------------------------
+# HIT140 - Assignment 3: Step 4
+# Inferential Statistical Testing (Investigation B)
+# ---------------------------------------------
+
+import pandas as pd
+from scipy import stats
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Load merged dataset (from Step 3)
+merged = pd.read_csv("cleaned_dataset1.csv")
+rat = pd.read_csv("cleaned_dataset2.csv")
+
+# Map bat seasons
+merged['season'] = merged['season'].map({0: 'winter', 1: 'spring'})
+
+# If your rat dataset was merged earlier, use that combined version
+# otherwise, we’ll just use bat dataset for behaviour tests
+
+# ---------------------------------------------------
+# 1️⃣ Hypothesis 1: Bat risk-taking by season
+# ---------------------------------------------------
+
+winter_risk = merged[merged['season'] == 'winter']['risk']
+spring_risk = merged[merged['season'] == 'spring']['risk']
+
+# Independent t-test (assuming unequal variances)
+t_stat, p_value = stats.ttest_ind(winter_risk, spring_risk, equal_var=False)
+print("H1: Bat risk-taking difference between winter and spring")
+print(f"T-statistic: {t_stat:.3f}, p-value: {p_value:.4f}")
+
+if p_value < 0.05:
+    print("✅ Reject H0: There IS a significant difference in risk-taking.\n")
+else:
+    print("❌ Fail to reject H0: No significant difference in risk-taking.\n")
+
+# ---------------------------------------------------
+# 2️⃣ Hypothesis 2: Reward behaviour by season
+# ---------------------------------------------------
+
+winter_reward = merged[merged['season'] == 'winter']['reward']
+spring_reward = merged[merged['season'] == 'spring']['reward']
+
+t_stat, p_value = stats.ttest_ind(winter_reward, spring_reward, equal_var=False)
+print("H2: Reward behaviour difference between winter and spring")
+print(f"T-statistic: {t_stat:.3f}, p-value: {p_value:.4f}")
+
+if p_value < 0.05:
+    print("✅ Reject H0: Reward rates differ by season.\n")
+else:
+    print("❌ Fail to reject H0: No significant seasonal difference in reward.\n")
+
+# ---------------------------------------------------
+# 3️⃣ Hypothesis 3: Rat arrivals by season
+# ---------------------------------------------------
+
+# If you have the season column mapped in rat dataset:
+rat['season'] = rat['month'].map({0: 'winter', 1: 'spring', 2: 'spring', 3: 'spring', 4: 'spring', 5: 'spring'})
+
+winter_rat = rat[rat['season'] == 'winter']['rat_arrival_number']
+spring_rat = rat[rat['season'] == 'spring']['rat_arrival_number']
+
+t_stat, p_value = stats.ttest_ind(winter_rat, spring_rat, equal_var=False)
+print("H3: Rat arrival frequency difference between winter and spring")
+print(f"T-statistic: {t_stat:.3f}, p-value: {p_value:.4f}")
+
+if p_value < 0.05:
+    print("✅ Reject H0: Rat arrivals significantly differ between seasons.\n")
+else:
+    print("❌ Fail to reject H0: No significant seasonal difference in rat arrivals.\n")
+
+# ---------------------------------------------------
+# 4️⃣ Chi-square Test: Association between season & risk-taking
+# ---------------------------------------------------
+
+contingency_table = pd.crosstab(merged['season'], merged['risk'])
+chi2, p, dof, expected = stats.chi2_contingency(contingency_table)
+print("Chi-square test for association between season and bat risk behaviour")
+print(f"Chi2 statistic: {chi2:.3f}, p-value: {p:.4f}")
+
+if p < 0.05:
+    print("✅ Reject H0: There IS an association between season and risk-taking.\n")
+else:
+    print("❌ Fail to reject H0: No association between season and risk-taking.\n")
+
+# ---------------------------------------------------
+# 5️⃣ Visual Support: Mean plots
+# ---------------------------------------------------
+
+sns.barplot(data=merged, x='season', y='risk', estimator='mean', ci='sd', palette='coolwarm')
+plt.title("Average Bat Risk-taking by Season (with SD)")
+plt.show()
+
+sns.barplot(data=merged, x='season', y='reward', estimator='mean', ci='sd', palette='Greens')
+plt.title("Average Reward Behaviour by Season (with SD)")
+plt.show()
+
+
+Seasonal Comparison 
+# ---------------------------------------------
+# HIT140 - Assignment 3: Step 3 (Fixed)
+# Seasonal and Contextual Comparisons
+# ---------------------------------------------
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Load your cleaned datasets
+bat = pd.read_csv("cleaned_dataset1.csv")
+rat = pd.read_csv("cleaned_dataset2.csv")
+
+# ---------------------------------------------
+# 1️⃣ Inspect columns
+# ---------------------------------------------
+print("Bat dataset columns:", bat.columns.tolist())
+print("Rat dataset columns:", rat.columns.tolist())
+
+print("Unique bat seasons:", bat['season'].unique())
+print("Unique rat months:", rat['month'].unique())
+
+# ---------------------------------------------
+# 2️⃣ Convert numeric months to season labels
+# ---------------------------------------------
+# Define simple season mapping (adjust to your dataset’s time span)
+# Example assumption: months 0–2 = winter, 3–5 = spring, 6–8 = summer, 9–11 = autumn
+
+def map_season(month):
+    if month in [0, 1, 2]:
+        return "winter"
+    elif month in [3, 4, 5]:
+        return "spring"
+    elif month in [6, 7, 8]:
+        return "summer"
+    else:
+        return "autumn"
+
+# Add 'season' column to rat dataset
+rat["season"] = rat["month"].apply(map_season)
+
+# For the bat dataset, map 0 → winter, 1 → spring (based on your printout)
+bat["season"] = bat["season"].map({0: "winter", 1: "spring"})
+
+# ---------------------------------------------
+# 3️⃣ Merge on common keys
+# ---------------------------------------------
+merged = pd.merge(bat, rat, on=["month", "season"], how="inner")
+
+print("Merged dataset shape:", merged.shape)
+print(merged.head())
+
+# ---------------------------------------------
+# 4️⃣ Seasonal Comparisons
+# ---------------------------------------------
+
+# plt.figure(figsize=(8,5))
+# sns.boxplot(data=rat, x='season', y='bat_landing_number', palette='Set2')
+# plt.title("Bat Landing Frequency by Season")
+# plt.xlabel("Season")
+# plt.ylabel("Number of Bat Landings")
+# plt.show()
+
+# plt.figure(figsize=(8,5))
+# sns.boxplot(data=rat, x='season', y='rat_arrival_number', palette='coolwarm')
+# plt.title("Rat Arrival Frequency by Season")
+# plt.xlabel("Season")
+# plt.ylabel("Number of Rat Arrivals (per 30 min)")
+# plt.show()
+
+# plt.figure(figsize=(8,5))
+# sns.barplot(data=bat, x='season', y='risk', estimator='mean', ci='sd', palette='Blues')
+# plt.title("Average Bat Risk-taking Behaviour by Season")
+# plt.xlabel("Season")
+# plt.ylabel("Average Risk (0=avoid, 1=take risk)")
+# plt.show()
+
+plt.figure(figsize=(8,6))
+sns.scatterplot(data=merged, x='rat_arrival_number', y='risk', hue='season', alpha=0.7)
+plt.title("Bat Risk Behaviour vs Rat Activity by Season")
+plt.xlabel("Number of Rat Arrivals")
+plt.ylabel("Risk-taking (0/1)")
+plt.show()
+
+# ---------------------------------------------
+# 5️⃣ Summary Table
+# ---------------------------------------------
+summary = merged.groupby('season')[['bat_landing_number', 'rat_arrival_number', 
+                                    'rat_minutes', 'risk', 'reward']].mean().round(2)
+print("\n=== Seasonal Averages Summary ===\n", summary)
+
+
